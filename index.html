@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario de muebles</title>
+<!-- Lector de códigos de barras: usa el del navegador si existe (Chrome Android); si no, ZXing en WebAssembly -->
+<script src="https://cdn.jsdelivr.net/npm/barcode-detector@3/dist/iife/polyfill.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #222; }
+  header { background: #1f4e79; color: #fff; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; margin: 0; }
+  main { padding: 12px; max-width: 640px; margin: auto; }
+  .card { background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
+  input, select, textarea { width: 100%; padding: 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; }
+  #codigo { font-family: monospace; font-size: 20px; letter-spacing: 1px; }
+  button { font-size: 16px; padding: 12px; border: 0; border-radius: 8px; cursor: pointer; }
+  .primario { background: #1f4e79; color: #fff; width: 100%; }
+  .verde { background: #1f7a3a; color: #fff; width: 100%; }
+  .naranja { background: #c55a11; color: #fff; width: 100%; }
+  .gris { background: #e2e5e9; }
+  .foto-btn { display: block; text-align: center; background: #1f4e79; color: #fff; padding: 16px; border-radius: 8px; font-size: 17px; font-weight: 600; }
+  #preview { width: 100%; max-height: 260px; object-fit: contain; margin-top: 10px; display: none; border-radius: 8px; background: #000; }
+  #estado { font-size: 14px; margin-top: 8px; color: #555; }
+  .fila2 { display: flex; gap: 8px; }
+  .fila2 > * { flex: 1; }
+  .aviso { color: #b00020; font-size: 13px; margin-top: 4px; }
+  .ok { color: #1f7a3a; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #eee; vertical-align: top; }
+  td.num { font-family: monospace; font-size: 12px; word-break: break-all; }
+  td button { padding: 4px 8px; font-size: 13px; }
+  .ayuda { font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Inventario de muebles</h1>
+  <span id="contador">0 registros</span>
+</header>
+<main>
+  <div class="card">
+    <label class="foto-btn" for="camara">📷 Tomar foto de la etiqueta</label>
+    <input id="camara" type="file" accept="image/*" capture="environment" hidden>
+    <p class="ayuda">Acércate hasta que la etiqueta llene la foto, derecha y con buena luz.</p>
+    <img id="preview" alt="Foto de la etiqueta">
+    <div id="estado"></div>
+  </div>
+
+  <div class="card">
+    <input type="hidden" id="editId">
+    <label for="codigo">Número de inventario (debajo del código de barras) *</label>
+    <input id="codigo" inputmode="numeric" autocomplete="off">
+    <div id="avisoCodigo" class="aviso"></div>
+
+    <label for="serie">No. de serie</label>
+    <input id="serie" autocomplete="off">
+
+    <label for="ubicacion">Ubicación / área <span class="ayuda">(se conserva entre registros)</span></label>
+    <input id="ubicacion" list="listaUbic" autocomplete="off">
+    <datalist id="listaUbic"></datalist>
+
+    <label for="descripcion">Descripción / tipo</label>
+    <input id="descripcion" list="listaDesc" autocomplete="off">
+    <datalist id="listaDesc"></datalist>
+
+    <label for="estadoMueble">Estado / condición</label>
+    <select id="estadoMueble">
+      <option>Bueno</option><option>Regular</option><option>Malo</option><option>Para baja</option>
+    </select>
+
+    <label for="observaciones">Observaciones</label>
+    <textarea id="observaciones" rows="2"></textarea>
+
+    <div class="fila2" style="margin-top:14px">
+      <button class="gris" id="btnLimpiar">Limpiar</button>
+      <button class="verde" id="btnGuardar">Guardar</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <button class="naranja" id="btnEnviar" style="display:none;margin-bottom:8px">📤 Enviar a la PC (Excel compartido)</button>
+    <div id="estadoEnvio" class="ayuda" style="margin-bottom:8px"></div>
+    <button class="primario" id="btnExcel">⬇ Descargar Excel en este celular</button>
+    <h3 style="margin:16px 0 6px">Registros</h3>
+    <table>
+      <thead><tr><th>Número</th><th>Ubicación</th><th>Desc.</th><th>PC</th><th></th></tr></thead>
+      <tbody id="tabla"></tbody>
+    </table>
+    <button class="gris" id="btnBorrarTodo" style="margin-top:14px;width:100%">Borrar todos los registros de este celular</button>
+  </div>
+</main>
+
+<script>
+const LONGITUD = 16;               // dígitos del número de inventario (ej. 0001020309900000)
+const CLAVE = 'inventario_muebles_v1';
+const $ = id => document.getElementById(id);
+let registros = JSON.parse(localStorage.getItem(CLAVE) || '[]');
+const enServidor = location.protocol.startsWith('http');
+
+function guardarLocal() { localStorage.setItem(CLAVE, JSON.stringify(registros)); }
+
+// --- Foto: se lee únicamente el código de barras ---
+$('camara').addEventListener('change', async e => {
+  const archivo = e.target.files[0];
+  e.target.value = '';
+  if (!archivo) return;
+  const url = URL.createObjectURL(archivo);
+  $('preview').src = url;
+  $('preview').style.display = 'block';
+  $('estado').textContent = 'Leyendo código de barras...';
+  try {
+    const img = await cargarImagen(url);
+    const numero = await leerCodigoBarras(img);
+    if (numero) {
+      $('codigo').value = numero;
+      $('estado').innerHTML = '<div class="ok">✓ Número leído del código de barras.</div>';
+    } else {
+      $('estado').innerHTML = '<div class="aviso">No se pudo leer el código de barras. Toma otra foto (barras completas, derechas y sin brillo) o escribe el número a mano.</div>';
+    }
+    validarCodigo();
+  } catch (err) {
+    $('estado').innerHTML = `<div class="aviso">No se pudo abrir la foto: ${err.message || err}</div>`;
+  }
+});
+
+function cargarImagen(url) {
+  return new Promise((ok, mal) => { const i = new Image(); i.onload = () => ok(i); i.onerror = mal; i.src = url; });
+}
+
+// Lector de código de barras: nativo en Chrome Android; en iPhone y otros lo pone la librería
+// barcode-detector (ZXing en WebAssembly). Prueba la foto original y, si no, una versión con más contraste.
+let detector = null;
+async function leerCodigoBarras(img) {
+  if (!('BarcodeDetector' in window)) return '';
+  try {
+    if (!detector) detector = new BarcodeDetector();
+    for (const fuente of [img, prepararImagen(img)]) {
+      const valores = (await detector.detect(fuente))
+        .map(r => (r.rawValue || '').replace(/\D/g, ''))
+        .filter(v => v.length >= 8);
+      const num = valores.find(v => v.length === LONGITUD) || valores[0];
+      if (num) return num;
+    }
+  } catch (err) {
+    console.warn('Lector de código de barras:', err);
+  }
+  return '';
+}
+
+// Escala a ~2000px, escala de grises y más contraste: ayuda con barras gastadas o con poca luz.
+function prepararImagen(img) {
+  const escala = Math.min(1, 2000 / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width = img.width * escala; c.height = img.height * escala;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  const d = ctx.getImageData(0, 0, c.width, c.height);
+  for (let i = 0; i < d.data.length; i += 4) {
+    let g = 0.299 * d.data[i] + 0.587 * d.data[i + 1] + 0.114 * d.data[i + 2];
+    g = Math.max(0, Math.min(255, (g - 128) * 1.6 + 128));
+    d.data[i] = d.data[i + 1] = d.data[i + 2] = g;
+  }
+  ctx.putImageData(d, 0, 0);
+  return c;
+}
+
+// --- Validación del número: solo dígitos, longitud y duplicados ---
+$('codigo').addEventListener('input', () => {
+  $('codigo').value = $('codigo').value.replace(/\D/g, '');
+  validarCodigo();
+});
+function validarCodigo() {
+  const c = $('codigo').value.trim();
+  const avisos = [];
+  if (c && c.length !== LONGITUD) avisos.push(`Tiene ${c.length} dígitos; se esperaban ${LONGITUD}.`);
+  const existe = c && registros.find(r => r.codigo === c && r.id !== $('editId').value);
+  if (existe) avisos.push(`⚠ Ya registrado en este celular (${existe.ubicacion || 'sin ubicación'}).`);
+  $('avisoCodigo').innerHTML = avisos.join('<br>');
+}
+
+// --- Guardar / limpiar ---
+$('btnGuardar').onclick = () => {
+  const codigo = $('codigo').value.trim();
+  if (!codigo) { alert('Falta el número de inventario'); return; }
+  if (codigo.length !== LONGITUD && !confirm(`El número tiene ${codigo.length} dígitos (se esperaban ${LONGITUD}). ¿Guardar de todos modos?`)) return;
+  const datos = {
+    codigo,
+    serie: $('serie').value.trim(),
+    ubicacion: $('ubicacion').value.trim(),
+    descripcion: $('descripcion').value.trim(),
+    estado: $('estadoMueble').value,
+    observaciones: $('observaciones').value.trim(),
+    enviado: false,
+  };
+  const editId = $('editId').value;
+  if (editId) {
+    Object.assign(registros.find(r => r.id === editId), datos);
+  } else {
+    const id = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    registros.unshift({ id, fecha: new Date().toLocaleString('es-MX'), ...datos });
+  }
+  guardarLocal();
+  limpiar(true);
+  pintar();
+};
+
+$('btnLimpiar').onclick = () => limpiar(false);
+
+function limpiar(conservarUbicacion) {
+  ['editId', 'codigo', 'serie', 'descripcion', 'observaciones'].forEach(id => $(id).value = '');
+  if (!conservarUbicacion) $('ubicacion').value = '';
+  $('estadoMueble').value = 'Bueno';
+  $('avisoCodigo').textContent = '';
+  $('preview').style.display = 'none';
+  $('estado').textContent = '';
+}
+
+// --- Tabla ---
+function pintar() {
+  const pendientes = registros.filter(r => !r.enviado).length;
+  $('contador').textContent = registros.length + (registros.length === 1 ? ' registro' : ' registros');
+  $('tabla').innerHTML = '';
+  registros.forEach(r => {
+    const tr = document.createElement('tr');
+    [[r.codigo, 'num'], [r.ubicacion], [r.descripcion], [r.enviado ? '✓' : '—']].forEach(([v, cls]) => {
+      const td = document.createElement('td'); td.textContent = v; if (cls) td.className = cls; tr.appendChild(td);
+    });
+    const td = document.createElement('td');
+    const ed = document.createElement('button'); ed.textContent = '✏'; ed.className = 'gris'; ed.onclick = () => editar(r.id);
+    const del = document.createElement('button'); del.textContent = '🗑'; del.className = 'gris'; del.onclick = () => borrar(r.id);
+    td.append(ed, ' ', del); tr.appendChild(td);
+    $('tabla').appendChild(tr);
+  });
+  const opciones = campo => [...new Set(registros.map(r => r[campo]).filter(Boolean))]
+    .map(u => `<option>${u.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</option>`).join('');
+  $('listaUbic').innerHTML = opciones('ubicacion');
+  $('listaDesc').innerHTML = opciones('descripcion');
+  if (enServidor) {
+    $('btnEnviar').style.display = 'block';
+    $('btnEnviar').textContent = `📤 Enviar a la PC (${pendientes} pendiente${pendientes === 1 ? '' : 's'})`;
+  }
+}
+
+function editar(id) {
+  const r = registros.find(x => x.id === id);
+  $('editId').value = r.id;
+  $('codigo').value = r.codigo; $('serie').value = r.serie; $('ubicacion').value = r.ubicacion;
+  $('descripcion').value = r.descripcion; $('estadoMueble').value = r.estado; $('observaciones').value = r.observaciones;
+  validarCodigo();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function borrar(id) {
+  if (!confirm('¿Borrar este registro de este celular?')) return;
+  registros = registros.filter(r => r.id !== id);
+  guardarLocal(); pintar();
+}
+
+$('btnBorrarTodo').onclick = () => {
+  if (!registros.length) return;
+  const pend = registros.filter(r => !r.enviado).length;
+  const msg = pend ? `Hay ${pend} registros que NO se han enviado a la PC. ¿Borrar TODO de todos modos?` : '¿Borrar todos los registros de este celular? (ya están en la PC)';
+  if (!confirm(msg)) return;
+  registros = []; guardarLocal(); pintar();
+};
+
+// --- Excel ---
+function construirLibro(lista) {
+  const conteo = {};
+  lista.forEach(r => conteo[r.codigo] = (conteo[r.codigo] || 0) + 1);
+  const filas = lista.map(r => ({
+    'Número de inventario': r.codigo, 'No. de serie': r.serie, 'Ubicación': r.ubicacion, 'Descripción': r.descripcion,
+    'Estado': r.estado, 'Observaciones': r.observaciones, 'Fecha de captura': r.fecha,
+    'Duplicado': conteo[r.codigo] > 1 ? 'SÍ' : '',
+  }));
+  const hoja = XLSX.utils.json_to_sheet(filas);
+  // Número como texto para que Excel no quite los ceros iniciales
+  lista.forEach((r, i) => { hoja[XLSX.utils.encode_cell({ r: i + 1, c: 0 })] = { t: 's', v: r.codigo }; });
+  hoja['!cols'] = [{ wch: 20 }, { wch: 18 }, { wch: 18 }, { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 20 }, { wch: 10 }];
+  hoja['!autofilter'] = { ref: hoja['!ref'] };
+  const libro = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(libro, hoja, 'Inventario');
+  return libro;
+}
+
+$('btnExcel').onclick = () => {
+  if (!registros.length) { alert('No hay registros para exportar'); return; }
+  XLSX.writeFile(construirLibro([...registros].reverse()), `inventario_${new Date().toISOString().slice(0, 10)}.xlsx`);
+};
+
+// --- Enviar a la PC: el servidor junta los registros de todos los celulares en un solo Excel ---
+$('btnEnviar').onclick = async () => {
+  if (!registros.length) { alert('No hay registros para enviar'); return; }
+  $('btnEnviar').disabled = true;
+  $('estadoEnvio').textContent = 'Enviando...';
+  try {
+    const limpios = registros.map(({ enviado, ...r }) => r);
+    const r1 = await fetch('api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(limpios) });
+    if (!r1.ok) throw new Error('La PC no respondió bien (' + r1.status + ')');
+    const todos = await r1.json();
+    registros.forEach(r => r.enviado = true);
+    guardarLocal(); pintar();
+
+    const b64 = XLSX.write(construirLibro(todos), { bookType: 'xlsx', type: 'base64' });
+    const r2 = await fetch('api/excel', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: b64 });
+    const res = await r2.json();
+    if (!r2.ok) throw new Error(res.error);
+    $('estadoEnvio').innerHTML = `<span class="ok">✓ Enviado. La PC tiene ${todos.length} registros en total en ${res.archivo}.</span>`;
+  } catch (err) {
+    $('estadoEnvio').innerHTML = `<span class="aviso">${err.message === 'Failed to fetch' ? 'No hay conexión con la PC. ¿Está abierto el servidor y estás en el mismo Wi-Fi?' : err.message}</span>`;
+  } finally {
+    $('btnEnviar').disabled = false;
+  }
+};
+
+pintar();
+</script>
+</body>
+</html>
